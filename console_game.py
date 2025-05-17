@@ -1,88 +1,93 @@
-from db_scripts import *
-import random
 
-def play_quiz(quiz_id):
-    """
-    Функция для игры в квиз.
-    Принимает quiz_id — ID выбранной викторины.
-    """
-    question_id = 0
-    score = 0
-    total_questions = 0
+import os
+from random import shuffle
+from flask import Flask, session, request, redirect, render_template, url_for
+from db_scripts import get_question_after, get_quizes, check_answer
 
-    while True:
-        # Получаем следующий вопрос
-        question_data = get_question_after(quiz_id, question_id)
-        if not question_data:
-            break  # Если больше нет вопросов, выходим из цикла
+def start_quiz(quiz_id):
+    '''создаёт нужные значения в словаре session'''
+    session['quiz'] = quiz_id
+    session['last_question'] = 0
+    session['answers'] = 0
+    session['total'] = 0
 
-        # Распаковываем данные вопроса
-        question_id, question, answer, wrong1, wrong2, wrong3 = question_data
 
-        # Создаем список вариантов ответов и перемешиваем их
-        options = [answer, wrong1, wrong2, wrong3]
-        random.shuffle(options)
+def quiz_form():
+    ''' функция получает список викторин из базы и формирует форму с выпадающим списком'''
+    q_list = get_quizes()
+    return render_template('start.html', q_list=q_list)
 
-        # Выводим вопрос и варианты ответов
-        print(f"\nВопрос: {question}")
-        for idx, option in enumerate(options, start=1):
-            print(f"{idx}. {option}")
+def index():
+    ''' Первая страница: если пришли запросом GET, то выбрать викторину, 
+    если POST - то запомнить id викторины и отправлять на вопросы'''
+    if request.method == 'GET':
+        # викторина не выбрана, сбрасываем id викторины и показываем форму выбора
+        start_quiz(-1)
+        return quiz_form()
+    else:
+        # получили дополнительные данные в запросе! Используем их:
+        quest_id = request.form.get('quiz') # выбранный номер викторины 
+        start_quiz(quest_id)
+        return redirect(url_for('test'))
 
-        # Получаем ответ пользователя
-        while True:
-            user_answer = input("Выберите правильный вариант (1-4): ")
-            try:
-                user_choice = int(user_answer) - 1
-                if 0 <= user_choice < len(options):
-                    selected_option = options[user_choice]
-                    if selected_option == answer:
-                        print("Правильно!")
-                        score += 1
-                    else:
-                        print(f"Неправильно! Правильный ответ: {answer}")
-                    total_questions += 1
-                    break
-                else:
-                    print("Неверный выбор. Пожалуйста, введите число от 1 до 4.")
-            except ValueError:
-                print("Неверный формат ввода. Пожалуйста, введите число от 1 до 4.")
+def save_answers():
+    '''получает данные из формы, проверяет, верен ли ответ, записывает итоги в сессию'''
+    answer = request.form.get('ans_text')
+    quest_id = request.form.get('q_id')
+    # этот вопрос уже задан:
+    session['last_question'] = quest_id
+    # увеличиваем счетчик вопросов:
+    session['total'] += 1
+    # проверить, совпадает ли ответ с верным для этого id
+    if check_answer(quest_id, answer):
+        session['answers'] += 1
 
-    # Итоговый результат
-    print(f"\nИгра завершена! Ваш результат: {score}/{total_questions}")
+def question_form(question):
+    '''получает строку из базы данных, соответствующую вопросу, возвращает html с формой '''
+    # question - результат работы get_question_after
+    # поля: 
+            # [0] - номер вопроса в викторине, 
+            # [1] - текст вопроса, 
+            # [2] - правильный ответ, [3],[4],[5] - неверные
 
-def list_quizzes():
-    """
-    Выводит список доступных викторин.
-    """
-    db_name = 'quiz.sqlite'
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM quiz")
-    quizzes = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    # перемешиваем ответы:
+    answers_list = [
+        question[2], question[3], question[4], question[5]
+    ]
+    shuffle(answers_list)
+    # передаём в шаблон, возвращаем результат:
+    return render_template('test.html', question=question[1], quest_id=question[0], answers_list=answers_list)
 
-    print("\nДоступные викторины:")
-    for quiz in quizzes:
-        print(f"{quiz[0]}. {quiz[1]}")
+def test():
+    '''возвращает страницу вопроса'''
+    if not ('quiz' in session) or int(session['quiz']) < 0:
+        return redirect(url_for('index'))
+    else:
+        
+        if request.method == 'POST':
+            save_answers()
+    
+        next_question = get_question_after(session['last_question'], session['quiz'])
+        if next_question is None or len(next_question) == 0:
+            # вопросы закончились:
+            return redirect(url_for('result'))
+        else:            
+            return question_form(next_question)
 
-def main():
-    """
-    Основная функция для запуска игры.
-    """
-    print("Добро пожаловать в игру 'Квиз'!")
+def result():
+    html = render_template('result.html', right=session['answers'], total=session['total'])
+    session.clear()
+    return html
 
-    # Вывод списка викторин
-    list_quizzes()
-
-    # Выбор викторины пользователем
-    try:
-        quiz_id = int(input("Введите номер викторины, чтобы начать игру: "))
-        play_quiz(quiz_id)
-    except ValueError:
-        print("Неверный формат ввода. Пожалуйста, введите число.")
-    except Exception as e:
-        print(f"Произошла ошибка: {e}")
+folder = os.getcwd() # запомнили текущую рабочую папку
+# Создаём объект веб-приложения:
+app = Flask(__name__, template_folder=folder, static_folder=folder)  
+app.add_url_rule('/', 'index', index, methods=['post', 'get'])   # создаёт правило для URL '/'
+app.add_url_rule('/test', 'test', test, methods=['post', 'get']) # создаёт правило для URL '/test'
+app.add_url_rule('/result', 'result', result) # создаёт правило для URL '/test'
+# Устанавливаем ключ шифрования:
+app.config['SECRET_KEY'] = 'Какой-то секретный супернадёжный ключ для сессий'
 
 if __name__ == "__main__":
-    main()
+    # Запускаем веб-сервер на нужном порту и хосте:
+    app.run(port=4654)
